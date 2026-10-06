@@ -1,3 +1,4 @@
+
 package de.nicole.jks50gmonitor
 
 import android.Manifest
@@ -25,115 +26,284 @@ class MainActivity : AppCompatActivity() {
     private var gatt: BluetoothGatt? = null
     private val rx = ArrayList<Byte>()
 
-    private val SERVICE_FFE0 = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
-    private val CHAR_FFE1 = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
-    private val CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+    private val SERVICE_FFE0 =
+        UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
+    private val CHAR_FFE1 =
+        UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
+    private val CCCD =
+        UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
         status = findViewById(R.id.status)
         live = findViewById(R.id.live)
         log = findViewById(R.id.log)
         connect = findViewById(R.id.connect)
+
         connect.setOnClickListener { ensurePermissionsAndScan() }
     }
 
     private fun ensurePermissionsAndScan() {
         val needed = mutableListOf<String>()
+
         if (Build.VERSION.SDK_INT >= 31) {
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                != PackageManager.PERMISSION_GRANTED)
                 needed += Manifest.permission.BLUETOOTH_SCAN
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED)
                 needed += Manifest.permission.BLUETOOTH_CONNECT
-        } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        } else if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
             needed += Manifest.permission.ACCESS_FINE_LOCATION
         }
+
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), 7)
-        } else scan()
+        } else {
+            scan()
+        }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 7 && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) scan()
+        if (requestCode == 7 &&
+            grantResults.isNotEmpty() &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            scan()
+        }
     }
 
     private fun scan() {
         val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = manager.adapter ?: return
+
         status.text = "Suche nach OXIMETER …"
+        live.text = "Noch keine Live-Daten"
+        log.text = ""
+        rx.clear()
+
+        try {
+            gatt?.close()
+        } catch (_: Exception) {}
+        gatt = null
+
         append("BLE-Scan gestartet")
-        val scanner = adapter.bluetoothLeScanner
+
+        val scanner = adapter.bluetoothLeScanner ?: run {
+            append("Bluetooth-Scanner nicht verfügbar")
+            return
+        }
+
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val name = try {
-                    if (Build.VERSION.SDK_INT >= 31 &&
-                        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) null
-                    else result.device.name
-                } catch (_: SecurityException) { null }
+                    result.device.name
+                } catch (_: SecurityException) {
+                    null
+                }
 
                 if (name?.contains("OXIMETER", ignoreCase = true) == true) {
-                    scanner.stopScan(this)
+                    try {
+                        scanner.stopScan(this)
+                    } catch (_: Exception) {}
+
                     append("Gefunden: $name / ${result.device.address}")
                     connectGatt(result.device)
                 }
             }
+
+            override fun onScanFailed(errorCode: Int) {
+                append("Scan-Fehler: $errorCode")
+            }
         }
-        scanner.startScan(callback)
+
+        try {
+            scanner.startScan(callback)
+        } catch (e: Exception) {
+            append("Scan konnte nicht starten: ${e.message}")
+            return
+        }
+
         main.postDelayed({
-            try { scanner.stopScan(callback) } catch (_: Exception) {}
-            if (gatt == null) status.text = "Kein OXIMETER gefunden – erneut versuchen"
+            try {
+                scanner.stopScan(callback)
+            } catch (_: Exception) {}
+
+            if (gatt == null) {
+                status.text = "Kein OXIMETER gefunden"
+            }
         }, 15000)
     }
 
     private fun connectGatt(device: BluetoothDevice) {
         status.text = "Verbinde …"
-        gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        gatt = device.connectGatt(
+            this,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE
+        )
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(g: BluetoothGatt, statusCode: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                ui { status.text = "Verbunden – Dienste werden gelesen"; append("GATT verbunden") }
-                g.requestMtu(247)
-                g.discoverServices()
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                ui { status.text = "Getrennt"; append("GATT getrennt") }
+
+        override fun onConnectionStateChange(
+            g: BluetoothGatt,
+            statusCode: Int,
+            newState: Int
+        ) {
+            ui { append("Verbindungsstatus: $statusCode") }
+
+            if (newState == BluetoothProfile.STATE_CONNECTED &&
+                statusCode == BluetoothGatt.GATT_SUCCESS) {
+
+                ui {
+                    status.text = "Verbunden – Dienste werden gelesen"
+                    append("GATT verbunden")
+                }
+
+                val started = g.discoverServices()
+                ui { append("Dienstsuche gestartet: $started") }
+
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED ||
+                statusCode != BluetoothGatt.GATT_SUCCESS) {
+
+                ui {
+                    status.text = "Getrennt"
+                    append("GATT getrennt / Status $statusCode")
+                }
+                g.close()
             }
         }
 
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, statusCode: Int) {
-            ui { append("MTU: $mtu") }
-        }
+        override fun onServicesDiscovered(
+            g: BluetoothGatt,
+            statusCode: Int
+        ) {
+            ui { append("Dienste gefunden / Status $statusCode") }
 
-        override fun onServicesDiscovered(g: BluetoothGatt, statusCode: Int) {
-            val c = g.getService(SERVICE_FFE0)?.getCharacteristic(CHAR_FFE1)
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
+                ui { status.text = "Dienstsuche fehlgeschlagen" }
+                return
+            }
+
+            val c = g.getService(SERVICE_FFE0)
+                ?.getCharacteristic(CHAR_FFE1)
+
             if (c == null) {
                 ui {
                     status.text = "FFE0/FFE1 nicht gefunden"
-                    append("Bekannte FFE0/FFE1-Schnittstelle fehlt")
+                    append("Verfügbare Dienste:")
+                    g.services.forEach { append(it.uuid.toString()) }
                 }
                 return
             }
-            g.setCharacteristicNotification(c, true)
-            c.getDescriptor(CCCD)?.let { d ->
-                if (Build.VERSION.SDK_INT >= 33) {
-                    g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+
+            ui {
+                append("FFE0 / FFE1 gefunden")
+                append("Eigenschaften: ${c.properties}")
+            }
+
+            val notifySupported =
+                (c.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+            val indicateSupported =
+                (c.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+
+            ui {
+                append("Notify unterstützt: $notifySupported")
+                append("Indicate unterstützt: $indicateSupported")
+            }
+
+            if (!notifySupported && !indicateSupported) {
+                ui {
+                    status.text = "FFE1 unterstützt keine Notifications"
+                }
+                return
+            }
+
+            val localEnabled = g.setCharacteristicNotification(c, true)
+            ui { append("Lokale Notification-Aktivierung: $localEnabled") }
+
+            if (!localEnabled) {
+                ui { status.text = "Notification-Aktivierung fehlgeschlagen" }
+                return
+            }
+
+            val descriptor = c.getDescriptor(CCCD)
+
+            if (descriptor == null) {
+                ui {
+                    status.text = "CCCD fehlt"
+                    append("Descriptor 2902 nicht gefunden")
+                }
+                return
+            }
+
+            val value = if (notifySupported) {
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            } else {
+                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            }
+
+            val writeStarted = if (Build.VERSION.SDK_INT >= 33) {
+                g.writeDescriptor(descriptor, value) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                descriptor.value = value
+                @Suppress("DEPRECATION")
+                g.writeDescriptor(descriptor)
+            }
+
+            ui {
+                append("CCCD-Schreibvorgang gestartet: $writeStarted")
+                status.text = if (writeStarted) {
+                    "Verbunden – warte auf Bestätigung"
                 } else {
-                    @Suppress("DEPRECATION")
-                    run { d.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(d) }
+                    "CCCD-Schreibvorgang fehlgeschlagen"
                 }
             }
+        }
+
+        override fun onDescriptorWrite(
+            g: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            statusCode: Int
+        ) {
+            if (descriptor.uuid != CCCD) return
+
             ui {
-                status.text = "Verbunden – Notifications aktiv"
-                append("FFE0 / FFE1 aktiv")
+                append("CCCD-Schreibstatus: $statusCode")
+
+                if (statusCode == BluetoothGatt.GATT_SUCCESS) {
+                    status.text = "Verbunden – Notifications bestätigt"
+                    append("FFE1 Notifications erfolgreich aktiviert")
+                    append("Warte auf Messdaten …")
+                } else {
+                    status.text = "Notifications fehlgeschlagen"
+                    append("CCCD-Fehler: $statusCode")
+                }
             }
         }
 
         @Deprecated("Deprecated in API 33")
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            consume(characteristic.value ?: return)
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (Build.VERSION.SDK_INT < 33 &&
+                characteristic.uuid == CHAR_FFE1) {
+                @Suppress("DEPRECATION")
+                consume(characteristic.value ?: return)
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -141,26 +311,45 @@ class MainActivity : AppCompatActivity() {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            consume(value)
+            if (characteristic.uuid == CHAR_FFE1) {
+                consume(value)
+            }
         }
     }
 
     @Synchronized
     private fun consume(chunk: ByteArray) {
-        ui { append("RX ${hex(chunk)}") }
+        ui {
+            append("RX ${hex(chunk)}")
+            live.text = "Bluetooth-Daten empfangen:\n${hex(chunk)}"
+        }
+
         chunk.forEach { rx.add(it) }
+
         while (true) {
-            while (rx.size >= 2 && !((rx[0].toInt() and 0xff) == 0xAA && (rx[1].toInt() and 0xff) == 0xBB)) {
+            while (rx.size >= 2 &&
+                !((rx[0].toInt() and 0xff) == 0xAA &&
+                  (rx[1].toInt() and 0xff) == 0xBB)) {
                 rx.removeAt(0)
             }
+
             if (rx.size < 5) return
-            val payloadLen = (rx[2].toInt() and 0xff) or ((rx[3].toInt() and 0xff) shl 8)
+
+            val payloadLen =
+                (rx[2].toInt() and 0xff) or
+                ((rx[3].toInt() and 0xff) shl 8)
+
+            if (payloadLen > 8192) {
+                rx.removeAt(0)
+                continue
+            }
+
             val total = 2 + 2 + payloadLen + 1
-            if (payloadLen > 8192) { rx.removeAt(0); continue }
             if (rx.size < total) return
 
             val frame = ByteArray(total) { rx[it] }
             repeat(total) { rx.removeAt(0) }
+
             parseFrame(frame)
         }
     }
@@ -168,12 +357,18 @@ class MainActivity : AppCompatActivity() {
     private fun parseFrame(frame: ByteArray) {
         val expected = frame.last().toInt() and 0xff
         var sum = 0
-        for (i in 2 until frame.lastIndex) sum = (sum + (frame[i].toInt() and 0xff)) and 0xff
+
+        for (i in 2 until frame.lastIndex) {
+            sum = (sum + (frame[i].toInt() and 0xff)) and 0xff
+        }
+
         val payload = frame.copyOfRange(4, frame.lastIndex)
 
         ui {
             append("FRAME ${hex(frame)}")
-            append("Checksum ${if (sum == expected) "OK" else "FEHLER"} ($sum/$expected)")
+            append(
+                "Checksum ${if (sum == expected) "OK" else "FEHLER"}"
+            )
         }
 
         if (payload.size >= 3 &&
@@ -181,9 +376,10 @@ class MainActivity : AppCompatActivity() {
             (payload[1].toInt() and 0xff) == 0x03 &&
             (payload[2].toInt() and 0xff) == 0x02) {
 
-            // Die folgenden Bytes werden bewusst noch NICHT fest als SpO2/Puls beschriftet.
-            // In den bisherigen Mitschnitten waren u.a. 0x64 (=100) und 0x5A (=90) zu sehen.
-            val body = payload.drop(3).joinToString(" ") { "%02X".format(it.toInt() and 0xff) }
+            val body = payload.drop(3).joinToString(" ") {
+                "%02X".format(it.toInt() and 0xff)
+            }
+
             ui { live.text = "Live-Frame 40 03 02\n$body" }
         }
 
@@ -196,14 +392,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun append(s: String) = ui {
         val old = log.text.toString()
-        log.text = (old + (if (old.isEmpty()) "" else "\n") + s).takeLast(16000)
+        log.text = (old + (if (old.isEmpty()) "" else "\n") + s)
+            .takeLast(16000)
     }
 
-    private fun hex(b: ByteArray) = b.joinToString(" ") { "%02X".format(it.toInt() and 0xff) }
+    private fun hex(b: ByteArray) =
+        b.joinToString(" ") {
+            "%02X".format(it.toInt() and 0xff)
+        }
+
     private fun ui(block: () -> Unit) = runOnUiThread(block)
 
     override fun onDestroy() {
         super.onDestroy()
-        try { gatt?.close() } catch (_: Exception) {}
+        try {
+            gatt?.close()
+        } catch (_: Exception) {}
     }
 }
