@@ -155,6 +155,16 @@ class MainActivity : AppCompatActivity() {
 
     private val gattCallback = object : BluetoothGattCallback() {
 
+override fun onMtuChanged(
+    g: BluetoothGatt,
+    mtu: Int,
+    statusCode: Int
+) {
+    ui {
+        append("MTU tatsächlich: $mtu / Status: $statusCode")
+    }
+}
+
         override fun onConnectionStateChange(
             g: BluetoothGatt,
             statusCode: Int,
