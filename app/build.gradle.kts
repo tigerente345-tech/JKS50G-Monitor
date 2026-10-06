@@ -6,6 +6,10 @@ plugins {
 android {
     namespace = "de.nicole.jks50gmonitor"
     compileSdk = 35
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
 
     defaultConfig {
         applicationId = "de.nicole.jks50gmonitor"
