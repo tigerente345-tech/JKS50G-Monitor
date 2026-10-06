@@ -170,8 +170,11 @@ class MainActivity : AppCompatActivity() {
                     append("GATT verbunden")
                 }
 
-                val started = g.discoverServices()
-                ui { append("Dienstsuche gestartet: $started") }
+                val mtuStarted = g.requestMtu(247)
+ui { append("MTU 247 angefordert: $mtuStarted") }
+
+val started = g.discoverServices()
+ui { append("Dienstsuche gestartet: $started") }
 
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED ||
                 statusCode != BluetoothGatt.GATT_SUCCESS) {
