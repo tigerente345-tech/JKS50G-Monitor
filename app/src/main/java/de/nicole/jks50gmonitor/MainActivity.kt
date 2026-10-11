@@ -186,4 +186,749 @@ class MainActivity : AppCompatActivity() {
 
                 if (
                     name?.contains(
-                        "
+                        "OXIMETER",
+                        ignoreCase = true
+                    ) == true
+                ) {
+
+                    try {
+                        scanner.stopScan(this)
+                    } catch (_: Exception) {
+                    }
+
+                    append(
+                        "Gefunden: $name / ${result.device.address}"
+                    )
+
+                    connectGatt(result.device)
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                append("Scan-Fehler: $errorCode")
+            }
+        }
+
+        try {
+            scanner.startScan(callback)
+        } catch (e: Exception) {
+
+            append(
+                "Scan konnte nicht starten: ${e.message}"
+            )
+
+            return
+        }
+
+        main.postDelayed({
+
+            try {
+                scanner.stopScan(callback)
+            } catch (_: Exception) {
+            }
+
+            if (gatt == null) {
+                status.text = "Kein OXIMETER gefunden"
+            }
+
+        }, 15000)
+    }
+
+    private fun connectGatt(device: BluetoothDevice) {
+
+        status.text = "Verbinde …"
+
+        gatt = device.connectGatt(
+            this,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE
+        )
+    }
+
+    private val gattCallback =
+        object : BluetoothGattCallback() {
+
+            override fun onMtuChanged(
+                g: BluetoothGatt,
+                mtu: Int,
+                statusCode: Int
+            ) {
+                ui {
+                    append(
+                        "MTU geändert: $mtu / Status: $statusCode"
+                    )
+                }
+            }
+
+            override fun onConnectionStateChange(
+                g: BluetoothGatt,
+                statusCode: Int,
+                newState: Int
+            ) {
+
+                ui {
+                    append(
+                        "Verbindungsstatus: $statusCode"
+                    )
+                }
+
+                if (
+                    newState == BluetoothProfile.STATE_CONNECTED &&
+                    statusCode == BluetoothGatt.GATT_SUCCESS
+                ) {
+
+                    ui {
+                        status.text =
+                            "Verbunden – Dienste werden gelesen"
+
+                        append("GATT verbunden")
+
+                        /*
+                         * WICHTIGER TEST:
+                         * Wir fordern absichtlich KEINE größere MTU an.
+                         *
+                         * Vorher:
+                         * g.requestMtu(247)
+                         *
+                         * Jetzt lassen wir die BLE-Verbindung mit ihrer
+                         * normalen MTU arbeiten.
+                         */
+                        append(
+                            "MTU-Test: keine große MTU angefordert"
+                        )
+                    }
+
+                    val started = g.discoverServices()
+
+                    ui {
+                        append(
+                            "Dienstsuche gestartet: $started"
+                        )
+                    }
+
+                } else if (
+                    newState == BluetoothProfile.STATE_DISCONNECTED ||
+                    statusCode != BluetoothGatt.GATT_SUCCESS
+                ) {
+
+                    ui {
+
+                        if (historyActive) {
+
+                            val received = historyRx.size
+
+                            status.text =
+                                "History-Übertragung abgebrochen"
+
+                            live.text =
+                                "History unvollständig\n" +
+                                "$received / $historyExpected Byte empfangen"
+
+                            append(
+                                "HISTORY ABBRUCH: " +
+                                "$received / $historyExpected Byte"
+                            )
+
+                        } else {
+
+                            status.text = "Getrennt"
+                        }
+
+                        append(
+                            "GATT getrennt / Status $statusCode"
+                        )
+                    }
+
+                    try {
+                        g.close()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+
+            override fun onServicesDiscovered(
+                g: BluetoothGatt,
+                statusCode: Int
+            ) {
+
+                ui {
+                    append(
+                        "Dienste gefunden / Status $statusCode"
+                    )
+                }
+
+                if (
+                    statusCode != BluetoothGatt.GATT_SUCCESS
+                ) {
+                    ui {
+                        status.text = "Dienstsuche fehlgeschlagen"
+                    }
+                    return
+                }
+
+                val c =
+                    g.getService(SERVICE_FFE0)
+                        ?.getCharacteristic(CHAR_FFE1)
+
+                if (c == null) {
+
+                    ui {
+                        status.text =
+                            "FFE0/FFE1 nicht gefunden"
+
+                        append("Verfügbare Dienste:")
+
+                        g.services.forEach {
+                            append(it.uuid.toString())
+                        }
+                    }
+
+                    return
+                }
+
+                ffe1 = c
+
+                ui {
+                    append("FFE0 / FFE1 gefunden")
+                    append(
+                        "Eigenschaften: ${c.properties}"
+                    )
+                }
+
+                val notifySupported =
+                    (
+                        c.properties and
+                            BluetoothGattCharacteristic.PROPERTY_NOTIFY
+                        ) != 0
+
+                val indicateSupported =
+                    (
+                        c.properties and
+                            BluetoothGattCharacteristic.PROPERTY_INDICATE
+                        ) != 0
+
+                ui {
+                    append(
+                        "Notify unterstützt: $notifySupported"
+                    )
+                    append(
+                        "Indicate unterstützt: $indicateSupported"
+                    )
+                }
+
+                if (!notifySupported && !indicateSupported) {
+
+                    ui {
+                        status.text =
+                            "FFE1 unterstützt keine Notifications"
+                    }
+
+                    return
+                }
+
+                val localEnabled =
+                    g.setCharacteristicNotification(
+                        c,
+                        true
+                    )
+
+                ui {
+                    append(
+                        "Lokale Notification-Aktivierung: $localEnabled"
+                    )
+                }
+
+                if (!localEnabled) {
+
+                    ui {
+                        status.text =
+                            "Notification-Aktivierung fehlgeschlagen"
+                    }
+
+                    return
+                }
+
+                val descriptor =
+                    c.getDescriptor(CCCD)
+
+                if (descriptor == null) {
+
+                    ui {
+                        status.text = "CCCD fehlt"
+                        append(
+                            "Descriptor 2902 nicht gefunden"
+                        )
+                    }
+
+                    return
+                }
+
+                val value =
+                    if (notifySupported) {
+                        BluetoothGattDescriptor
+                            .ENABLE_NOTIFICATION_VALUE
+                    } else {
+                        BluetoothGattDescriptor
+                            .ENABLE_INDICATION_VALUE
+                    }
+
+                val writeStarted =
+                    if (Build.VERSION.SDK_INT >= 33) {
+
+                        g.writeDescriptor(
+                            descriptor,
+                            value
+                        ) == BluetoothStatusCodes.SUCCESS
+
+                    } else {
+
+                        @Suppress("DEPRECATION")
+                        descriptor.value = value
+
+                        @Suppress("DEPRECATION")
+                        g.writeDescriptor(descriptor)
+                    }
+
+                ui {
+
+                    append(
+                        "CCCD-Schreibvorgang gestartet: $writeStarted"
+                    )
+
+                    status.text =
+                        if (writeStarted) {
+                            "Verbunden – warte auf Bestätigung"
+                        } else {
+                            "CCCD-Schreibvorgang fehlgeschlagen"
+                        }
+                }
+            }
+
+            override fun onDescriptorWrite(
+                g: BluetoothGatt,
+                descriptor: BluetoothGattDescriptor,
+                statusCode: Int
+            ) {
+
+                if (descriptor.uuid != CCCD) return
+
+                ui {
+                    append(
+                        "CCCD-Schreibstatus: $statusCode"
+                    )
+                }
+
+                if (
+                    statusCode == BluetoothGatt.GATT_SUCCESS
+                ) {
+
+                    ui {
+
+                        status.text =
+                            "Verbunden – Notifications bestätigt"
+
+                        append(
+                            "FFE1 Notifications erfolgreich aktiviert"
+                        )
+
+                        append(
+                            "History-Abruf wird gestartet …"
+                        )
+                    }
+
+                    main.postDelayed(
+                        {
+                            sendHistoryCommand(g)
+                        },
+                        1500
+                    )
+
+                } else {
+
+                    ui {
+                        status.text =
+                            "Notifications fehlgeschlagen"
+
+                        append(
+                            "CCCD-Fehler: $statusCode"
+                        )
+                    }
+                }
+            }
+
+            @Deprecated("Deprecated in API 33")
+            override fun onCharacteristicChanged(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic
+            ) {
+
+                if (
+                    Build.VERSION.SDK_INT < 33 &&
+                    characteristic.uuid == CHAR_FFE1
+                ) {
+
+                    @Suppress("DEPRECATION")
+                    consume(
+                        characteristic.value ?: return
+                    )
+                }
+            }
+
+            override fun onCharacteristicChanged(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                value: ByteArray
+            ) {
+
+                if (characteristic.uuid == CHAR_FFE1) {
+                    consume(value)
+                }
+            }
+        }
+
+    private fun sendHistoryCommand(
+        g: BluetoothGatt
+    ) {
+
+        val c = ffe1
+
+        if (c == null) {
+
+            append(
+                "History-Abruf nicht möglich: FFE1 fehlt"
+            )
+
+            return
+        }
+
+        historyRx.clear()
+        historyActive = false
+        historyExpected = 0
+
+        append(
+            "TX ${hex(HISTORY_COMMAND)}"
+        )
+
+        val started =
+            if (Build.VERSION.SDK_INT >= 33) {
+
+                g.writeCharacteristic(
+                    c,
+                    HISTORY_COMMAND,
+                    BluetoothGattCharacteristic
+                        .WRITE_TYPE_NO_RESPONSE
+                ) == BluetoothStatusCodes.SUCCESS
+
+            } else {
+
+                @Suppress("DEPRECATION")
+                c.writeType =
+                    BluetoothGattCharacteristic
+                        .WRITE_TYPE_NO_RESPONSE
+
+                @Suppress("DEPRECATION")
+                c.value = HISTORY_COMMAND
+
+                @Suppress("DEPRECATION")
+                g.writeCharacteristic(c)
+            }
+
+        ui {
+
+            append(
+                "History-Befehl gesendet: $started"
+            )
+
+            status.text =
+                if (started) {
+                    "History angefordert – warte auf Daten"
+                } else {
+                    "History-Befehl konnte nicht gesendet werden"
+                }
+        }
+    }
+
+    @Synchronized
+    private fun consume(chunk: ByteArray) {
+
+        if (historyActive) {
+
+            chunk.forEach {
+                historyRx.add(it)
+            }
+
+            showHistoryProgress()
+
+            if (
+                historyExpected > 0 &&
+                historyRx.size >= historyExpected
+            ) {
+
+                historyActive = false
+
+                ui {
+
+                    status.text =
+                        "History vollständig empfangen"
+
+                    live.text =
+                        "History vollständig\n" +
+                            "${historyRx.size} / " +
+                            "$historyExpected Byte"
+
+                    append(
+                        "HISTORY VOLLSTÄNDIG: " +
+                            "${historyRx.size} Byte"
+                    )
+                }
+            }
+
+            return
+        }
+
+        val start = findHistoryStart(chunk)
+
+        if (start >= 0) {
+
+            historyRx.clear()
+
+            for (i in start until chunk.size) {
+                historyRx.add(chunk[i])
+            }
+
+            if (historyRx.size >= 4) {
+
+                val length =
+                    (historyRx[2].toInt() and 0xff) or
+                        (
+                            (historyRx[3].toInt() and 0xff)
+                                shl 8
+                            )
+
+                historyExpected = 2 + length
+            }
+
+            historyActive = true
+
+            ui {
+                append("HISTORY-START erkannt")
+                append(
+                    "Erwartete Größe: $historyExpected Byte"
+                )
+            }
+
+            showHistoryProgress()
+
+            return
+        }
+
+        ui {
+            append(
+                "RX ${hex(chunk)}"
+            )
+
+            live.text =
+                "Bluetooth-Daten empfangen:\n${hex(chunk)}"
+        }
+
+        chunk.forEach {
+            rx.add(it)
+        }
+
+        parseNormalFrames()
+    }
+
+    private fun findHistoryStart(
+        data: ByteArray
+    ): Int {
+
+        if (data.size < 7) {
+            return -1
+        }
+
+        for (i in 0..data.size - 7) {
+
+            if (
+                (data[i].toInt() and 0xff) == 0xAA &&
+                (data[i + 1].toInt() and 0xff) == 0xBB &&
+                (data[i + 2].toInt() and 0xff) == 0xFF &&
+                (data[i + 3].toInt() and 0xff) == 0x07 &&
+                (data[i + 4].toInt() and 0xff) == 0x43 &&
+                (data[i + 5].toInt() and 0xff) == 0x01 &&
+                (data[i + 6].toInt() and 0xff) == 0x27
+            ) {
+                return i
+            }
+        }
+
+        return -1
+    }
+
+    private fun showHistoryProgress() {
+
+        val received = historyRx.size
+
+        ui {
+
+            status.text =
+                "History wird empfangen"
+
+            live.text =
+                "History-Daten\n" +
+                    "$received / $historyExpected Byte empfangen"
+
+            append(
+                "History: $received / " +
+                    "$historyExpected Byte"
+            )
+        }
+    }
+
+    private fun parseNormalFrames() {
+
+        while (true) {
+
+            while (
+                rx.size >= 2 &&
+                !(
+                    (rx[0].toInt() and 0xff) == 0xAA &&
+                        (rx[1].toInt() and 0xff) == 0xBB
+                    )
+            ) {
+                rx.removeAt(0)
+            }
+
+            if (rx.size < 5) return
+
+            val frameLength =
+                (rx[2].toInt() and 0xff) or
+                    (
+                        (rx[3].toInt() and 0xff)
+                            shl 8
+                        )
+
+            if (
+                frameLength < 3 ||
+                frameLength > 8192
+            ) {
+                rx.removeAt(0)
+                continue
+            }
+
+            val total = 2 + frameLength
+
+            if (rx.size < total) return
+
+            val frame =
+                ByteArray(total) {
+                    rx[it]
+                }
+
+            repeat(total) {
+                rx.removeAt(0)
+            }
+
+            parseFrame(frame)
+        }
+    }
+
+    private fun parseFrame(
+        frame: ByteArray
+    ) {
+
+        if (frame.size < 5) return
+
+        val expected =
+            frame.last().toInt() and 0xff
+
+        var sum = 0
+
+        for (i in 2 until frame.lastIndex) {
+
+            sum =
+                (
+                    sum +
+                        (frame[i].toInt() and 0xff)
+                    ) and 0xff
+        }
+
+        val payload =
+            frame.copyOfRange(
+                4,
+                frame.lastIndex
+            )
+
+        ui {
+
+            append(
+                "FRAME ${hex(frame)}"
+            )
+
+            append(
+                "Checksum ${
+                    if (sum == expected)
+                        "OK"
+                    else
+                        "FEHLER"
+                }"
+            )
+        }
+
+        if (
+            payload.size >= 3 &&
+            (payload[0].toInt() and 0xff) == 0x40 &&
+            (payload[1].toInt() and 0xff) == 0x03 &&
+            (payload[2].toInt() and 0xff) == 0x02
+        ) {
+
+            ui {
+                live.text =
+                    "Live-/Status-Frame empfangen"
+            }
+        }
+    }
+
+    private fun append(
+        s: String
+    ) = ui {
+
+        val old = log.text.toString()
+
+        log.text =
+            (
+                old +
+                    (
+                        if (old.isEmpty())
+                            ""
+                        else
+                            "\n"
+                        ) +
+                    s
+                ).takeLast(16000)
+    }
+
+    private fun hex(
+        b: ByteArray
+    ) =
+        b.joinToString(" ") {
+            "%02X".format(
+                it.toInt() and 0xff
+            )
+        }
+
+    private fun ui(
+        block: () -> Unit
+    ) =
+        runOnUiThread(block)
+
+    override fun onDestroy() {
+
+        super.onDestroy()
+
+        try {
+            gatt?.close()
+        } catch (_: Exception) {
+        }
+    }
+}
