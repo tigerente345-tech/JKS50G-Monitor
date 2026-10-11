@@ -1,3 +1,4 @@
+
 package de.nicole.jks50gmonitor
 
 import android.Manifest
@@ -28,10 +29,11 @@ class MainActivity : AppCompatActivity() {
     private var ffe1: BluetoothGattCharacteristic? = null
 
     private val rx = ArrayList<Byte>()
-
     private val historyRx = ArrayList<Byte>()
+
     private var historyActive = false
     private var historyExpected = 0
+    private var finishSequenceStarted = false
 
     private val SERVICE_FFE0 =
         UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
@@ -42,22 +44,38 @@ class MainActivity : AppCompatActivity() {
     private val CCCD =
         UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    /*
-     * Im HCI-Mitschnitt bestätigter History-Abruf.
-     */
+    // Im HCI-Mitschnitt bestätigter History-Abruf: 03 01
     private val HISTORY_COMMAND = byteArrayOf(
-        0xAA.toByte(),
-        0xBB.toByte(),
-        0x09,
-        0x00,
-        0x03,
-        0x01,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
+        0xAA.toByte(), 0xBB.toByte(),
+        0x09, 0x00,
+        0x03, 0x01,
+        0x00, 0x00, 0x00, 0x00,
         0x0D
     )
+
+    // Im Originalverkehr beobachteter Abschlussbefehl: 03 03
+    private val HISTORY_FINISH_COMMAND = byteArrayOf(
+        0xAA.toByte(), 0xBB.toByte(),
+        0x09, 0x00,
+        0x03, 0x03,
+        0x00, 0x00, 0x00, 0x00,
+        0x0F
+    )
+
+    // Im Originalverkehr direkt danach beobachtet: 04 01 01
+    private val SESSION_FINISH_COMMAND = byteArrayOf(
+        0xAA.toByte(), 0xBB.toByte(),
+        0x09, 0x00,
+        0x04, 0x01, 0x01,
+        0x00, 0x00, 0x00,
+        0x0F
+    )
+
+    private val historySilenceRunnable = Runnable {
+        if (historyActive && !finishSequenceStarted) {
+            finishHistorySequence()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,13 +119,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (needed.isNotEmpty()) {
-
             ActivityCompat.requestPermissions(
                 this,
                 needed.toTypedArray(),
                 7
             )
-
         } else {
             scan()
         }
@@ -118,7 +134,6 @@ class MainActivity : AppCompatActivity() {
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
-
         super.onRequestPermissionsResult(
             requestCode,
             permissions,
@@ -137,10 +152,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetBuffers() {
+        main.removeCallbacks(historySilenceRunnable)
+
         rx.clear()
         historyRx.clear()
+
         historyActive = false
         historyExpected = 0
+        finishSequenceStarted = false
     }
 
     private fun scan() {
@@ -212,11 +231,7 @@ class MainActivity : AppCompatActivity() {
         try {
             scanner.startScan(callback)
         } catch (e: Exception) {
-
-            append(
-                "Scan konnte nicht starten: ${e.message}"
-            )
-
+            append("Scan konnte nicht starten: ${e.message}")
             return
         }
 
@@ -255,9 +270,7 @@ class MainActivity : AppCompatActivity() {
                 statusCode: Int
             ) {
                 ui {
-                    append(
-                        "MTU geändert: $mtu / Status: $statusCode"
-                    )
+                    append("MTU geändert: $mtu / Status: $statusCode")
                 }
             }
 
@@ -268,9 +281,7 @@ class MainActivity : AppCompatActivity() {
             ) {
 
                 ui {
-                    append(
-                        "Verbindungsstatus: $statusCode"
-                    )
+                    append("Verbindungsstatus: $statusCode")
                 }
 
                 if (
@@ -283,28 +294,13 @@ class MainActivity : AppCompatActivity() {
                             "Verbunden – Dienste werden gelesen"
 
                         append("GATT verbunden")
-
-                        /*
-                         * WICHTIGER TEST:
-                         * Wir fordern absichtlich KEINE größere MTU an.
-                         *
-                         * Vorher:
-                         * g.requestMtu(247)
-                         *
-                         * Jetzt lassen wir die BLE-Verbindung mit ihrer
-                         * normalen MTU arbeiten.
-                         */
-                        append(
-                            "MTU-Test: keine große MTU angefordert"
-                        )
+                        append("Keine eigene MTU-Anforderung")
                     }
 
                     val started = g.discoverServices()
 
                     ui {
-                        append(
-                            "Dienstsuche gestartet: $started"
-                        )
+                        append("Dienstsuche gestartet: $started")
                     }
 
                 } else if (
@@ -312,26 +308,23 @@ class MainActivity : AppCompatActivity() {
                     statusCode != BluetoothGatt.GATT_SUCCESS
                 ) {
 
+                    main.removeCallbacks(historySilenceRunnable)
+
                     ui {
 
-                        if (historyActive) {
-
-                            val received = historyRx.size
-
+                        if (
+                            historyRx.isNotEmpty() &&
+                            historyExpected > 0 &&
+                            historyRx.size < historyExpected
+                        ) {
                             status.text =
-                                "History-Übertragung abgebrochen"
+                                "History-Übertragung beendet"
 
                             live.text =
                                 "History unvollständig\n" +
-                                "$received / $historyExpected Byte empfangen"
-
-                            append(
-                                "HISTORY ABBRUCH: " +
-                                "$received / $historyExpected Byte"
-                            )
-
+                                "${historyRx.size} / " +
+                                "$historyExpected Byte empfangen"
                         } else {
-
                             status.text = "Getrennt"
                         }
 
@@ -362,7 +355,8 @@ class MainActivity : AppCompatActivity() {
                     statusCode != BluetoothGatt.GATT_SUCCESS
                 ) {
                     ui {
-                        status.text = "Dienstsuche fehlgeschlagen"
+                        status.text =
+                            "Dienstsuche fehlgeschlagen"
                     }
                     return
                 }
@@ -391,22 +385,20 @@ class MainActivity : AppCompatActivity() {
 
                 ui {
                     append("FFE0 / FFE1 gefunden")
-                    append(
-                        "Eigenschaften: ${c.properties}"
-                    )
+                    append("Eigenschaften: ${c.properties}")
                 }
 
                 val notifySupported =
                     (
                         c.properties and
-                            BluetoothGattCharacteristic.PROPERTY_NOTIFY
-                        ) != 0
+                        BluetoothGattCharacteristic.PROPERTY_NOTIFY
+                    ) != 0
 
                 val indicateSupported =
                     (
                         c.properties and
-                            BluetoothGattCharacteristic.PROPERTY_INDICATE
-                        ) != 0
+                        BluetoothGattCharacteristic.PROPERTY_INDICATE
+                    ) != 0
 
                 ui {
                     append(
@@ -440,17 +432,14 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (!localEnabled) {
-
                     ui {
                         status.text =
                             "Notification-Aktivierung fehlgeschlagen"
                     }
-
                     return
                 }
 
-                val descriptor =
-                    c.getDescriptor(CCCD)
+                val descriptor = c.getDescriptor(CCCD)
 
                 if (descriptor == null) {
 
@@ -491,7 +480,6 @@ class MainActivity : AppCompatActivity() {
                     }
 
                 ui {
-
                     append(
                         "CCCD-Schreibvorgang gestartet: $writeStarted"
                     )
@@ -524,7 +512,6 @@ class MainActivity : AppCompatActivity() {
                 ) {
 
                     ui {
-
                         status.text =
                             "Verbunden – Notifications bestätigt"
 
@@ -591,62 +578,63 @@ class MainActivity : AppCompatActivity() {
         g: BluetoothGatt
     ) {
 
-        val c = ffe1
-
-        if (c == null) {
-
-            append(
-                "History-Abruf nicht möglich: FFE1 fehlt"
-            )
-
-            return
-        }
-
         historyRx.clear()
         historyActive = false
         historyExpected = 0
+        finishSequenceStarted = false
 
-        append(
-            "TX ${hex(HISTORY_COMMAND)}"
+        append("TX HISTORY: ${hex(HISTORY_COMMAND)}")
+
+        writeCommand(
+            g,
+            HISTORY_COMMAND,
+            "History-Befehl"
         )
+
+        ui {
+            status.text =
+                "History angefordert – warte auf Daten"
+        }
+    }
+
+    private fun writeCommand(
+        g: BluetoothGatt,
+        command: ByteArray,
+        name: String
+    ): Boolean {
+
+        val c = ffe1
+
+        if (c == null) {
+            append("$name nicht möglich: FFE1 fehlt")
+            return false
+        }
 
         val started =
             if (Build.VERSION.SDK_INT >= 33) {
 
                 g.writeCharacteristic(
                     c,
-                    HISTORY_COMMAND,
-                    BluetoothGattCharacteristic
-                        .WRITE_TYPE_NO_RESPONSE
+                    command,
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 ) == BluetoothStatusCodes.SUCCESS
 
             } else {
 
                 @Suppress("DEPRECATION")
                 c.writeType =
-                    BluetoothGattCharacteristic
-                        .WRITE_TYPE_NO_RESPONSE
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
                 @Suppress("DEPRECATION")
-                c.value = HISTORY_COMMAND
+                c.value = command
 
                 @Suppress("DEPRECATION")
                 g.writeCharacteristic(c)
             }
 
-        ui {
+        append("$name gesendet: $started")
 
-            append(
-                "History-Befehl gesendet: $started"
-            )
-
-            status.text =
-                if (started) {
-                    "History angefordert – warte auf Daten"
-                } else {
-                    "History-Befehl konnte nicht gesendet werden"
-                }
-        }
+        return started
     }
 
     @Synchronized
@@ -659,6 +647,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             showHistoryProgress()
+            restartHistorySilenceTimer()
 
             if (
                 historyExpected > 0 &&
@@ -666,20 +655,20 @@ class MainActivity : AppCompatActivity() {
             ) {
 
                 historyActive = false
+                main.removeCallbacks(historySilenceRunnable)
 
                 ui {
-
                     status.text =
                         "History vollständig empfangen"
 
                     live.text =
                         "History vollständig\n" +
-                            "${historyRx.size} / " +
-                            "$historyExpected Byte"
+                        "${historyRx.size} / " +
+                        "$historyExpected Byte"
 
                     append(
                         "HISTORY VOLLSTÄNDIG: " +
-                            "${historyRx.size} Byte"
+                        "${historyRx.size} Byte"
                     )
                 }
             }
@@ -701,15 +690,16 @@ class MainActivity : AppCompatActivity() {
 
                 val length =
                     (historyRx[2].toInt() and 0xff) or
-                        (
-                            (historyRx[3].toInt() and 0xff)
-                                shl 8
-                            )
+                    (
+                        (historyRx[3].toInt() and 0xff)
+                        shl 8
+                    )
 
                 historyExpected = 2 + length
             }
 
             historyActive = true
+            finishSequenceStarted = false
 
             ui {
                 append("HISTORY-START erkannt")
@@ -719,14 +709,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             showHistoryProgress()
+            restartHistorySilenceTimer()
 
             return
         }
 
         ui {
-            append(
-                "RX ${hex(chunk)}"
-            )
+            append("RX ${hex(chunk)}")
 
             live.text =
                 "Bluetooth-Daten empfangen:\n${hex(chunk)}"
@@ -739,13 +728,87 @@ class MainActivity : AppCompatActivity() {
         parseNormalFrames()
     }
 
+    private fun restartHistorySilenceTimer() {
+
+        main.removeCallbacks(historySilenceRunnable)
+
+        /*
+         * Vier Sekunden ohne ein einziges neues History-Paket:
+         * Dann führen wir den in der Original-App beobachteten
+         * Abschlussablauf aus.
+         */
+        main.postDelayed(
+            historySilenceRunnable,
+            4000
+        )
+    }
+
+    private fun finishHistorySequence() {
+
+        val g = gatt ?: return
+
+        finishSequenceStarted = true
+        main.removeCallbacks(historySilenceRunnable)
+
+        ui {
+            status.text =
+                "History steht – Abschluss wird gesendet"
+
+            append(
+                "4 Sekunden keine History-Daten"
+            )
+
+            append(
+                "TX ABSCHLUSS 03 03: " +
+                hex(HISTORY_FINISH_COMMAND)
+            )
+        }
+
+        writeCommand(
+            g,
+            HISTORY_FINISH_COMMAND,
+            "Abschluss 03 03"
+        )
+
+        /*
+         * Den zweiten beobachteten Befehl nicht gleichzeitig
+         * losschicken, sondern mit kurzem Abstand.
+         */
+        main.postDelayed({
+
+            ui {
+                append(
+                    "TX ABSCHLUSS 04 01 01: " +
+                    hex(SESSION_FINISH_COMMAND)
+                )
+            }
+
+            writeCommand(
+                g,
+                SESSION_FINISH_COMMAND,
+                "Abschluss 04 01 01"
+            )
+
+            ui {
+
+                status.text =
+                    "History-Abschluss gesendet"
+
+                live.text =
+                    "History unvollständig\n" +
+                    "${historyRx.size} / " +
+                    "$historyExpected Byte empfangen\n" +
+                    "Abschlussbefehle gesendet"
+            }
+
+        }, 500)
+    }
+
     private fun findHistoryStart(
         data: ByteArray
     ): Int {
 
-        if (data.size < 7) {
-            return -1
-        }
+        if (data.size < 7) return -1
 
         for (i in 0..data.size - 7) {
 
@@ -770,17 +833,15 @@ class MainActivity : AppCompatActivity() {
         val received = historyRx.size
 
         ui {
-
-            status.text =
-                "History wird empfangen"
+            status.text = "History wird empfangen"
 
             live.text =
                 "History-Daten\n" +
-                    "$received / $historyExpected Byte empfangen"
+                "$received / $historyExpected Byte empfangen"
 
             append(
                 "History: $received / " +
-                    "$historyExpected Byte"
+                "$historyExpected Byte"
             )
         }
     }
@@ -793,8 +854,8 @@ class MainActivity : AppCompatActivity() {
                 rx.size >= 2 &&
                 !(
                     (rx[0].toInt() and 0xff) == 0xAA &&
-                        (rx[1].toInt() and 0xff) == 0xBB
-                    )
+                    (rx[1].toInt() and 0xff) == 0xBB
+                )
             ) {
                 rx.removeAt(0)
             }
@@ -803,10 +864,10 @@ class MainActivity : AppCompatActivity() {
 
             val frameLength =
                 (rx[2].toInt() and 0xff) or
-                    (
-                        (rx[3].toInt() and 0xff)
-                            shl 8
-                        )
+                (
+                    (rx[3].toInt() and 0xff)
+                    shl 8
+                )
 
             if (
                 frameLength < 3 ||
@@ -845,12 +906,11 @@ class MainActivity : AppCompatActivity() {
         var sum = 0
 
         for (i in 2 until frame.lastIndex) {
-
             sum =
                 (
                     sum +
-                        (frame[i].toInt() and 0xff)
-                    ) and 0xff
+                    (frame[i].toInt() and 0xff)
+                ) and 0xff
         }
 
         val payload =
@@ -860,10 +920,7 @@ class MainActivity : AppCompatActivity() {
             )
 
         ui {
-
-            append(
-                "FRAME ${hex(frame)}"
-            )
+            append("FRAME ${hex(frame)}")
 
             append(
                 "Checksum ${
@@ -898,14 +955,14 @@ class MainActivity : AppCompatActivity() {
         log.text =
             (
                 old +
-                    (
-                        if (old.isEmpty())
-                            ""
-                        else
-                            "\n"
-                        ) +
-                    s
-                ).takeLast(16000)
+                (
+                    if (old.isEmpty())
+                        ""
+                    else
+                        "\n"
+                ) +
+                s
+            ).takeLast(16000)
     }
 
     private fun hex(
@@ -923,6 +980,8 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread(block)
 
     override fun onDestroy() {
+
+        main.removeCallbacks(historySilenceRunnable)
 
         super.onDestroy()
 
