@@ -23,10 +23,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var connect: Button
 
     private val main = Handler(Looper.getMainLooper())
+
     private var gatt: BluetoothGatt? = null
     private var ffe1: BluetoothGattCharacteristic? = null
 
     private val rx = ArrayList<Byte>()
+
+    // Separater Puffer nur für den großen History-Transfer
+    private val historyRx = ArrayList<Byte>()
+    private var historyActive = false
+    private var historyExpected = 0
 
     private val SERVICE_FFE0 =
         UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
@@ -38,8 +44,7 @@ class MainActivity : AppCompatActivity() {
         UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     /*
-     * Im Bluetooth-Mitschnitt bestätigter Befehl zum Abrufen
-     * der gespeicherten Messdaten.
+     * Im HCI-Mitschnitt bestätigter History-Abruf.
      */
     private val HISTORY_COMMAND = byteArrayOf(
         0xAA.toByte(),
@@ -132,6 +137,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun resetBuffers() {
+        rx.clear()
+        historyRx.clear()
+        historyActive = false
+        historyExpected = 0
+    }
+
     private fun scan() {
 
         val manager =
@@ -140,10 +152,10 @@ class MainActivity : AppCompatActivity() {
         val adapter = manager.adapter ?: return
 
         status.text = "Suche nach OXIMETER …"
-        live.text = "Noch keine Live-Daten"
+        live.text = "Noch keine Daten"
         log.text = ""
 
-        rx.clear()
+        resetBuffers()
         ffe1 = null
 
         try {
@@ -199,9 +211,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-
             scanner.startScan(callback)
-
         } catch (e: Exception) {
 
             append(
@@ -245,7 +255,6 @@ class MainActivity : AppCompatActivity() {
                 mtu: Int,
                 statusCode: Int
             ) {
-
                 ui {
                     append(
                         "MTU tatsächlich: $mtu / Status: $statusCode"
@@ -266,10 +275,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (
-                    newState ==
-                    BluetoothProfile.STATE_CONNECTED &&
-                    statusCode ==
-                    BluetoothGatt.GATT_SUCCESS
+                    newState == BluetoothProfile.STATE_CONNECTED &&
+                    statusCode == BluetoothGatt.GATT_SUCCESS
                 ) {
 
                     ui {
@@ -279,8 +286,7 @@ class MainActivity : AppCompatActivity() {
                         append("GATT verbunden")
                     }
 
-                    val mtuStarted =
-                        g.requestMtu(247)
+                    val mtuStarted = g.requestMtu(247)
 
                     ui {
                         append(
@@ -288,8 +294,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    val started =
-                        g.discoverServices()
+                    val started = g.discoverServices()
 
                     ui {
                         append(
@@ -298,21 +303,42 @@ class MainActivity : AppCompatActivity() {
                     }
 
                 } else if (
-                    newState ==
-                    BluetoothProfile.STATE_DISCONNECTED ||
-                    statusCode !=
-                    BluetoothGatt.GATT_SUCCESS
+                    newState == BluetoothProfile.STATE_DISCONNECTED ||
+                    statusCode != BluetoothGatt.GATT_SUCCESS
                 ) {
 
                     ui {
-                        status.text = "Getrennt"
+
+                        if (historyActive) {
+
+                            val received = historyRx.size
+
+                            status.text =
+                                "History-Übertragung abgebrochen"
+
+                            live.text =
+                                "History unvollständig\n" +
+                                "$received / $historyExpected Byte empfangen"
+
+                            append(
+                                "HISTORY ABBRUCH: " +
+                                "$received / $historyExpected Byte"
+                            )
+
+                        } else {
+
+                            status.text = "Getrennt"
+                        }
 
                         append(
                             "GATT getrennt / Status $statusCode"
                         )
                     }
 
-                    g.close()
+                    try {
+                        g.close()
+                    } catch (_: Exception) {
+                    }
                 }
             }
 
@@ -328,15 +354,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (
-                    statusCode !=
-                    BluetoothGatt.GATT_SUCCESS
+                    statusCode != BluetoothGatt.GATT_SUCCESS
                 ) {
-
                     ui {
-                        status.text =
-                            "Dienstsuche fehlgeschlagen"
+                        status.text = "Dienstsuche fehlgeschlagen"
                     }
-
                     return
                 }
 
@@ -385,16 +407,12 @@ class MainActivity : AppCompatActivity() {
                     append(
                         "Notify unterstützt: $notifySupported"
                     )
-
                     append(
                         "Indicate unterstützt: $indicateSupported"
                     )
                 }
 
-                if (
-                    !notifySupported &&
-                    !indicateSupported
-                ) {
+                if (!notifySupported && !indicateSupported) {
 
                     ui {
                         status.text =
@@ -433,7 +451,6 @@ class MainActivity : AppCompatActivity() {
 
                     ui {
                         status.text = "CCCD fehlt"
-
                         append(
                             "Descriptor 2902 nicht gefunden"
                         )
@@ -444,12 +461,9 @@ class MainActivity : AppCompatActivity() {
 
                 val value =
                     if (notifySupported) {
-
                         BluetoothGattDescriptor
                             .ENABLE_NOTIFICATION_VALUE
-
                     } else {
-
                         BluetoothGattDescriptor
                             .ENABLE_INDICATION_VALUE
                     }
@@ -460,8 +474,7 @@ class MainActivity : AppCompatActivity() {
                         g.writeDescriptor(
                             descriptor,
                             value
-                        ) ==
-                        BluetoothStatusCodes.SUCCESS
+                        ) == BluetoothStatusCodes.SUCCESS
 
                     } else {
 
@@ -480,11 +493,8 @@ class MainActivity : AppCompatActivity() {
 
                     status.text =
                         if (writeStarted) {
-
                             "Verbunden – warte auf Bestätigung"
-
                         } else {
-
                             "CCCD-Schreibvorgang fehlgeschlagen"
                         }
                 }
@@ -496,9 +506,7 @@ class MainActivity : AppCompatActivity() {
                 statusCode: Int
             ) {
 
-                if (descriptor.uuid != CCCD) {
-                    return
-                }
+                if (descriptor.uuid != CCCD) return
 
                 ui {
                     append(
@@ -507,11 +515,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (
-                    statusCode ==
-                    BluetoothGatt.GATT_SUCCESS
+                    statusCode == BluetoothGatt.GATT_SUCCESS
                 ) {
 
                     ui {
+
                         status.text =
                             "Verbunden – Notifications bestätigt"
 
@@ -524,14 +532,6 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    /*
-                     * Im Originalmitschnitt kam zunächst eine
-                     * Status-/Live-Antwort und unmittelbar danach
-                     * der History-Befehl.
-                     *
-                     * Wir geben dem Gerät deshalb kurz Zeit,
-                     * bevor wir den bestätigten History-Befehl senden.
-                     */
                     main.postDelayed(
                         {
                             sendHistoryCommand(g)
@@ -555,8 +555,7 @@ class MainActivity : AppCompatActivity() {
             @Deprecated("Deprecated in API 33")
             override fun onCharacteristicChanged(
                 gatt: BluetoothGatt,
-                characteristic:
-                    BluetoothGattCharacteristic
+                characteristic: BluetoothGattCharacteristic
             ) {
 
                 if (
@@ -573,15 +572,11 @@ class MainActivity : AppCompatActivity() {
 
             override fun onCharacteristicChanged(
                 gatt: BluetoothGatt,
-                characteristic:
-                    BluetoothGattCharacteristic,
+                characteristic: BluetoothGattCharacteristic,
                 value: ByteArray
             ) {
 
-                if (
-                    characteristic.uuid ==
-                    CHAR_FFE1
-                ) {
+                if (characteristic.uuid == CHAR_FFE1) {
                     consume(value)
                 }
             }
@@ -602,6 +597,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Für jeden neuen Abruf frischen History-Puffer verwenden.
+        historyRx.clear()
+        historyActive = false
+        historyExpected = 0
+
         append(
             "TX ${hex(HISTORY_COMMAND)}"
         )
@@ -614,8 +614,7 @@ class MainActivity : AppCompatActivity() {
                     HISTORY_COMMAND,
                     BluetoothGattCharacteristic
                         .WRITE_TYPE_NO_RESPONSE
-                ) ==
-                BluetoothStatusCodes.SUCCESS
+                ) == BluetoothStatusCodes.SUCCESS
 
             } else {
 
@@ -637,22 +636,106 @@ class MainActivity : AppCompatActivity() {
                 "History-Befehl gesendet: $started"
             )
 
-            if (started) {
-
-                status.text =
-                    "History angefordert – empfange Daten"
-
-            } else {
-
-                status.text =
+            status.text =
+                if (started) {
+                    "History angefordert – warte auf Daten"
+                } else {
                     "History-Befehl konnte nicht gesendet werden"
-            }
+                }
         }
     }
 
     @Synchronized
     private fun consume(chunk: ByteArray) {
 
+        /*
+         * Sobald der große History-Frame begonnen hat, zählen wir
+         * jedes weitere empfangene Byte sofort mit.
+         *
+         * Dadurch verlieren wir bei einem BLE-Abbruch nicht mehr
+         * die Information darüber, wie viel angekommen ist.
+         */
+        if (historyActive) {
+
+            chunk.forEach {
+                historyRx.add(it)
+            }
+
+            showHistoryProgress()
+
+            if (
+                historyExpected > 0 &&
+                historyRx.size >= historyExpected
+            ) {
+
+                historyActive = false
+
+                ui {
+
+                    status.text =
+                        "History vollständig empfangen"
+
+                    live.text =
+                        "History vollständig\n" +
+                        "${historyRx.size} / " +
+                        "$historyExpected Byte"
+
+                    append(
+                        "HISTORY VOLLSTÄNDIG: " +
+                        "${historyRx.size} Byte"
+                    )
+                }
+            }
+
+            return
+        }
+
+        /*
+         * Prüfen, ob dieses BLE-Paket den Anfang des großen
+         * History-Frames enthält.
+         *
+         * Bestätigter Anfang:
+         * AA BB FF 07 43 01 27
+         */
+        val start = findHistoryStart(chunk)
+
+        if (start >= 0) {
+
+            historyRx.clear()
+
+            for (i in start until chunk.size) {
+                historyRx.add(chunk[i])
+            }
+
+            if (historyRx.size >= 4) {
+
+                val length =
+                    (historyRx[2].toInt() and 0xff) or
+                    (
+                        (historyRx[3].toInt() and 0xff)
+                        shl 8
+                    )
+
+                historyExpected = 2 + length
+            }
+
+            historyActive = true
+
+            ui {
+                append("HISTORY-START erkannt")
+                append(
+                    "Erwartete Größe: $historyExpected Byte"
+                )
+            }
+
+            showHistoryProgress()
+
+            return
+        }
+
+        /*
+         * Andere kurze Pakete weiterhin protokollieren.
+         */
         ui {
             append(
                 "RX ${hex(chunk)}"
@@ -666,6 +749,57 @@ class MainActivity : AppCompatActivity() {
             rx.add(it)
         }
 
+        parseNormalFrames()
+    }
+
+    private fun findHistoryStart(
+        data: ByteArray
+    ): Int {
+
+        if (data.size < 7) {
+            return -1
+        }
+
+        for (i in 0..data.size - 7) {
+
+            if (
+                (data[i].toInt() and 0xff) == 0xAA &&
+                (data[i + 1].toInt() and 0xff) == 0xBB &&
+                (data[i + 2].toInt() and 0xff) == 0xFF &&
+                (data[i + 3].toInt() and 0xff) == 0x07 &&
+                (data[i + 4].toInt() and 0xff) == 0x43 &&
+                (data[i + 5].toInt() and 0xff) == 0x01 &&
+                (data[i + 6].toInt() and 0xff) == 0x27
+            ) {
+                return i
+            }
+        }
+
+        return -1
+    }
+
+    private fun showHistoryProgress() {
+
+        val received = historyRx.size
+
+        ui {
+
+            status.text =
+                "History wird empfangen"
+
+            live.text =
+                "History-Daten\n" +
+                "$received / $historyExpected Byte empfangen"
+
+            append(
+                "History: $received / " +
+                "$historyExpected Byte"
+            )
+        }
+    }
+
+    private fun parseNormalFrames() {
+
         while (true) {
 
             while (
@@ -678,21 +812,8 @@ class MainActivity : AppCompatActivity() {
                 rx.removeAt(0)
             }
 
-            if (rx.size < 5) {
-                return
-            }
+            if (rx.size < 5) return
 
-            /*
-             * Das Längenfeld enthält die Anzahl der Bytes
-             * ab dem Längenfeld selbst bis einschließlich
-             * Prüfsumme.
-             *
-             * Beispiel:
-             * AA BB 11 00 ... xx
-             *
-             * 0x0011 = 17 Byte
-             * plus AA BB = insgesamt 19 Byte.
-             */
             val frameLength =
                 (rx[2].toInt() and 0xff) or
                 (
@@ -704,17 +825,13 @@ class MainActivity : AppCompatActivity() {
                 frameLength < 3 ||
                 frameLength > 8192
             ) {
-
                 rx.removeAt(0)
                 continue
             }
 
-            val total =
-                2 + frameLength
+            val total = 2 + frameLength
 
-            if (rx.size < total) {
-                return
-            }
+            if (rx.size < total) return
 
             val frame =
                 ByteArray(total) {
@@ -733,18 +850,14 @@ class MainActivity : AppCompatActivity() {
         frame: ByteArray
     ) {
 
-        if (frame.size < 5) {
-            return
-        }
+        if (frame.size < 5) return
 
         val expected =
             frame.last().toInt() and 0xff
 
         var sum = 0
 
-        for (
-            i in 2 until frame.lastIndex
-        ) {
+        for (i in 2 until frame.lastIndex) {
 
             sum =
                 (
@@ -777,67 +890,14 @@ class MainActivity : AppCompatActivity() {
 
         if (
             payload.size >= 3 &&
-            (payload[0].toInt() and 0xff) ==
-                0x40 &&
-            (payload[1].toInt() and 0xff) ==
-                0x03 &&
-            (payload[2].toInt() and 0xff) ==
-                0x02
+            (payload[0].toInt() and 0xff) == 0x40 &&
+            (payload[1].toInt() and 0xff) == 0x03 &&
+            (payload[2].toInt() and 0xff) == 0x02
         ) {
-
-            val body =
-                payload
-                    .drop(3)
-                    .joinToString(" ") {
-
-                        "%02X".format(
-                            it.toInt() and 0xff
-                        )
-                    }
 
             ui {
                 live.text =
-                    "Live-Frame 40 03 02\n$body"
-            }
-        }
-
-        if (
-            payload.size >= 3 &&
-            (payload[0].toInt() and 0xff) ==
-                0x43 &&
-            (payload[1].toInt() and 0xff) ==
-                0x01 &&
-            (payload[2].toInt() and 0xff) ==
-                0x27
-        ) {
-
-            ui {
-
-                status.text =
-                    "Gespeicherte Messdaten empfangen"
-
-                live.text =
-                    "History-Daten empfangen\n" +
-                    "Frame: ${frame.size} Byte"
-
-                append(
-                    "HISTORY-FRAME erkannt: ${frame.size} Byte"
-                )
-            }
-        }
-
-        if (
-            payload.size >= 2 &&
-            (payload[0].toInt() and 0xff) ==
-                0x03 &&
-            (payload[1].toInt() and 0xff) ==
-                0x01
-        ) {
-
-            ui {
-                append(
-                    "History-Antwort 03 01 erkannt"
-                )
+                    "Live-/Status-Frame empfangen"
             }
         }
     }
@@ -846,8 +906,7 @@ class MainActivity : AppCompatActivity() {
         s: String
     ) = ui {
 
-        val old =
-            log.text.toString()
+        val old = log.text.toString()
 
         log.text =
             (
@@ -866,7 +925,6 @@ class MainActivity : AppCompatActivity() {
         b: ByteArray
     ) =
         b.joinToString(" ") {
-
             "%02X".format(
                 it.toInt() and 0xff
             )
