@@ -384,8 +384,7 @@ class MainActivity : AppCompatActivity() {
         if (!connected || !notifyReady) return
         try {
             val result = if (Build.VERSION.SDK_INT >= 33) {
-                g.writeCharacteristic(c, experimentalCommand, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-                    == BluetoothStatusCodes.SUCCESS
+                g.writeCharacteristic(c, experimentalCommand, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
